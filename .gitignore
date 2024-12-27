@@ -1,0 +1,5 @@
+# Ignore dataset folder
+chexlocalize
+*.pkl
+*.csv
+
