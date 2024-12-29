@@ -39,10 +39,9 @@ def normalize_images_spark(spark_df, output_folder):
             
             img = cv2.equalizeHist(img)
             
-            # generate unique identifier for filename
-            unique_id = uuid.uuid4().hex
-            base_name = os.path.basename(path)
-            new_filename = f"{os.path.splitext(base_name)[0]}_{unique_id}.png"
+            # extract relevant path for image naming
+            # e.g. 'test/patient65177/study1/view1_frontal.jpg' becomes 'patient65177/study1/view1_frontal.jpg'
+            new_filename = path.replace("/", "_")
             new_path = os.path.join(output_folder, new_filename)
             
             cv2.imwrite(new_path, img)
