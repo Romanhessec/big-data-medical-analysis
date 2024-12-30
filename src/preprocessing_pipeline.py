@@ -2,17 +2,19 @@ import pandas as pd
 import sys
 import os
 import cv2
-import uuid
+import shutil
 import numpy as np
 
 from pyspark.sql import SparkSession
 from pyspark.sql.functions import col, udf, concat, lit
+import matplotlib.pyplot as plt
 
 # add project root directory to the Python path
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
 from utils.preprocessing_testing_utils import (
-    test_normalization
+    test_normalization,
+    test_augmentation
 )
 
 def normalize_images_spark(spark_df, output_folder):
@@ -57,35 +59,43 @@ def normalize_images_spark(spark_df, output_folder):
     normalized_df.select("Normalized_path").collect()
 
     return normalized_df
+
 def augment_image(image):
     """
-    Augment image with rotation, noise, contrast adjustment, etc.
+    Augment image with rotation, scaling, translation, noise, contrast adjustment, etc.
     Args:
         image: Input image as a NumPy array.
     Returns:
-        Augmented image as a NumPy array.
+        List of augmented images.
     """
+
+    augmented_images = []
+
     # random rotation
-    angle = np.random.uniform(-15, 15)
-    (h, w) = image.shape[:2]
-    center = (w // 2, h // 2)
-    M = cv2.getRotationMatrix2D(center, angle, 1.0)
-    rotated = cv2.warpAffine(image, M, (w, h))
+    for _ in range(3):
+        angle = np.random.uniform(-5, 5)
+        (h, w) = image.shape[:2]
+        center = (w // 2, h // 2)
+        M = cv2.getRotationMatrix2D(center, angle, 1.0)
+        rotated = cv2.warpAffine(image, M, (w, h))
+        augmented_images.append(rotated)
 
-    # random contrast adjustment
-    alpha = cv2.randu(0.8, 1.2)  # contrast
-    beta = cv2.randu(-20, 20)    # brightness
-    contrast_adjusted = cv2.convertScaleAbs(rotated, alpha=alpha, beta=beta)
+    # scalind and translation
+    for _ in range(3):
+        scale = np.random.uniform(0.9, 1.1)
+        tx = np.random.randint(-3, 3)
+        ty = np.random.randint(-3, 3)
+        M = np.array([[scale, 0, tx], [0, scale, ty]], dtype=np.float32)
+        transformed = cv2.warpAffine(image, M, (w, h))
+        augmented_images.append(transformed)
 
-    # add Gaussian noise
-    noise = np.random.normal(0, 0.05, image.shape).astype(np.float32)
-    noisy_image = np.clip(contrast_adjusted + noise, 0, 1)
+    # gaussian noise
+    for _ in range (3):
+        noise = np.random.normal(0, 1, image.shape).astype(np.uint8)
+        noisy_image = cv2.add(image, noise)
+        augmented_images.append(noisy_image)
 
-    # random horizontal flip
-    if np.random.rand() > 0.5:
-        noisy_image = cv2.flip(noisy_image, 1)
-
-    return noisy_image
+    return augmented_images
 
 def augment_images_spark(spark_df, output_folder):
     """
@@ -97,17 +107,27 @@ def augment_images_spark(spark_df, output_folder):
     os.makedirs(output_folder, exist_ok=True)
 
     def augment_and_save(path):
-        img = cv2.imread(path, cv2.IMREAD_GRAYSCALE)
-        if img is None:
+        try:
+            img = cv2.imread(path, cv2.IMREAD_GRAYSCALE)
+            if img is None:
+                print(f"Failed to read image: {path}")
+                return None
+            augmented_images = augment_image(img)
+            saved_paths = []
+            for idx, augmented_img in enumerate(augmented_images):
+                new_path = os.path.join(output_folder, f"{path.replace('/', '_')}_{idx}.jpg")
+                cv2.imwrite(new_path, augmented_img)
+                saved_paths.append(new_path)
+            return ",".join(saved_paths)
+        except Exception as e:
+            print(f"Error processing {path}: {e}")
             return None
-        augmented_img = augment_image(img)
-        new_path = os.path.join(output_folder, os.path.basename(path))
-        cv2.imwrite(new_path, augmented_img)
-        return new_path
 
-    # apply augmentation in parallel using Spark
-    augment_udf = spark.udf.register("augment_and_save", augment_and_save)
-    augmented_df = spark_df.withColumn("Augmented_Path", augment_udf(col("Path")))
+    # register UDF
+    augment_udf = udf(lambda path: augment_and_save(path))
+
+    augmented_df = spark_df.withColumn("Augmented_Paths", augment_udf(col("Path")))
+    augmented_df.select("Augmented_Paths").collect()
 
     return augmented_df
 
@@ -141,6 +161,9 @@ spark = SparkSession.builder \
     .getOrCreate()
 
 # spark.sparkContext.setLogLevel("DEBUG") # delete later
+
+# clean output folder
+shutil.rmtree("output")
 
 # load datasets labels
 # WARNING: we do use test_labels.csv as val labels since test labels are 
@@ -179,23 +202,29 @@ os.makedirs(output_dir, exist_ok=True)
 normalized_val_df = normalize_images_spark(spark_val_df, output_dir)
 normalized_val_df.show()
 
-# Check number of processed rows
+# check number of processed rows
 print(f"Total processed rows: {normalized_val_df.count()}")
 
-# Verify output directory
+# verify output directory
 output_files = os.listdir(output_dir)
 print(f"Number of files in output directory: {len(output_files)}")
 
-# Cross-check with Spark processed rows
+# cross-check with Spark processed rows
 processed_rows = normalized_val_df.count()
 if len(output_files) != processed_rows:
     print("Mismatch: Processed rows do not match saved files.")
     print(f"Processed rows: {processed_rows}, Files in output: {len(output_files)}")
 
-# test_normalization(normalized_val_df, output_dir)
+# augment data
+augmented_output_dir = "output/augmented_images"
+os.makedirs(augmented_output_dir, exist_ok=True)
 
-# # augment data
-# augmented_val_df = augment_images_spark(normalized_val_df, "output/augmented_val")
+augmented_val_df = augment_images_spark(normalized_val_df, augmented_output_dir)
+augmented_val_df.show()
+
+# verify output 
+augmented_files = os.listdir(augmented_output_dir)
+print(f"Number of augmented files in output directory: {len(augmented_files)}")
 
 # # create distribution rules for each client
 # # this is a mock distribution - fix later
