@@ -20,3 +20,4 @@ pandas-2.2.3
 opencv-python-4.10.0.84
 pyspark-3.5.4
 matplotlib-3.10.0
+tensorflow-2.18.0
