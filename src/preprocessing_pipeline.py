@@ -6,7 +6,7 @@ import shutil
 import numpy as np
 
 from pyspark.sql import SparkSession
-from pyspark.sql.functions import col, udf, concat, lit
+from pyspark.sql.functions import col, udf, concat, lit, split, explode
 import matplotlib.pyplot as plt
 
 # add project root directory to the Python path
@@ -14,7 +14,9 @@ sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
 from utils.preprocessing_testing_utils import (
     test_normalization,
-    test_augmentation
+    test_augmentation,
+    test_partitioning,
+    verify_unique_split
 )
 
 def normalize_images_spark(spark_df, output_folder):
@@ -131,28 +133,78 @@ def augment_images_spark(spark_df, output_folder):
 
     return augmented_df
 
-def partition_data(spark, labels_df, client_distribution):
+def prepare_augmented_df_for_partitioning(augmented_df):
+    """
+    Prepare the augmented DataFrame for partitioning by exploding the 'Augmented_Paths' column.
+    Args:
+        augmented_df: Spark DataFrame containing the Augmented_Paths column.
+    Returns:
+        Reformatted Spark DataFrame suitable for partitioning.
+    """
+    # split the Augmented_Paths column into an array
+    augmented_df = augmented_df.withColumn("Augmented_Paths_Array", split(col("Augmented_Paths"), ","))
+
+    # explode the array to create individual rows for each augmented image
+    exploded_df = augmented_df.withColumn("Augmented_Path", explode(col("Augmented_Paths_Array")))
+
+    # drop the array column as it's no longer needed
+    exploded_df = exploded_df.drop("Augmented_Paths", "Augmented_Paths_Array")
+    
+    exploded_df.select("Augmented_Path").collect()
+
+    return exploded_df
+
+# this is how it is supposed to be done - for now, we will use the random splitting one
+def partition_data_spark(final_df, client_distribution, output_dir):
     """
     Partition data into non-IID subsets using Spark.
     Args:
-        spark: Spark session.
-        labels_df: Path to the CSV file or Pandas DataFrame with labels.
+        final_df: Final Spark DataFrame (augmented and prepared).
         client_distribution: Dictionary specifying label distribution for each client.
+        output_dir: Base directory to save partitioned data for each client.
     Returns:
-        A dictionary of Spark DataFrames for each client.
+        Dictionary with client IDs and corresponding Spark DataFrames.
     """
-    # convert panda df to spark df
-    spark_df = spark.createDataFrame(labels_df)
+    os.makedirs(output_dir, exist_ok=True)
 
-    clients = {}
+    client_dfs = {}
 
-    for client, distribution in client_distribution.items():
-        fractions = {label: distribution[label] for label in distribution}
-        # should add 
-        client_df = spark_df.sampleBy(col("Pneumonia"), fractions, seed = 42)
-        clients[client] = client_df
+    # WARNING - this is hardcoded now for "Pneumonia" - should fix later
+    for client_id, distribution in client_distribution.items():
+        unique_labels = [row[0] for row in final_df.select("Pneumonia").distinct().collect()]
+        sample_fractions = {label: distribution.get(label, 0) for label in unique_labels}
+        client_df = final_df.sampleBy("Pneumonia", fractions=sample_fractions, seed=42)
 
-    return clients
+        # save client-specific data
+        client_output_path = os.path.join(output_dir, f"{client_id}_data.csv")
+        client_df.write.csv(client_output_path, header=True)
+        client_dfs[client_id] = client_df
+
+    return client_dfs
+
+def partition_data_even_split(final_df, num_clients, output_dir):
+    """
+    Partition data into evenly split subsets for clients without overlap.
+    Args:
+        final_df: Final Spark DataFrame (augmented and prepared).
+        num_clients: Number of clients.
+        output_dir: Base directory to save partitioned data for each client.
+    Returns:
+        List of Spark DataFrames, one for each client.
+    """
+    os.makedirs(output_dir, exist_ok=True)
+
+    # randomly split data into unique subsets for each client
+    proportions = [1.0 / num_clients] * num_clients
+    client_dfs = final_df.randomSplit(proportions, seed=42)
+
+    # save each client's data
+    for idx, client_df in enumerate(client_dfs):
+        client_output_path = os.path.join(output_dir, f"Client_{idx + 1}_data.csv")
+        client_df.write.csv(client_output_path, header=True, mode='overwrite')
+        print(f"Client {idx + 1} data saved to {client_output_path}")
+
+    return client_dfs
 
 # initialize spark session
 spark = SparkSession.builder \
@@ -163,7 +215,8 @@ spark = SparkSession.builder \
 # spark.sparkContext.setLogLevel("DEBUG") # delete later
 
 # clean output folder
-shutil.rmtree("output")
+if os.path.exists("output"):
+    shutil.rmtree("output")
 
 # load datasets labels
 # WARNING: we do use test_labels.csv as val labels since test labels are 
@@ -196,17 +249,17 @@ if duplicates > 0:
     spark_val_df = spark_val_df.dropDuplicates(["Path"])
 
 # normalize data
-output_dir = "output/normalized_val"
-os.makedirs(output_dir, exist_ok=True)
+normalized_output_dir = "output/normalized_val"
+os.makedirs(normalized_output_dir, exist_ok=True)
 
-normalized_val_df = normalize_images_spark(spark_val_df, output_dir)
+normalized_val_df = normalize_images_spark(spark_val_df, normalized_output_dir)
 normalized_val_df.show()
 
 # check number of processed rows
 print(f"Total processed rows: {normalized_val_df.count()}")
 
 # verify output directory
-output_files = os.listdir(output_dir)
+output_files = os.listdir(normalized_output_dir)
 print(f"Number of files in output directory: {len(output_files)}")
 
 # cross-check with Spark processed rows
@@ -216,34 +269,29 @@ if len(output_files) != processed_rows:
     print(f"Processed rows: {processed_rows}, Files in output: {len(output_files)}")
 
 # augment data
-augmented_output_dir = "output/augmented_images"
-os.makedirs(augmented_output_dir, exist_ok=True)
+augmented_normalized_output_dir = "output/augmented_images"
+os.makedirs(augmented_normalized_output_dir, exist_ok=True)
 
-augmented_val_df = augment_images_spark(normalized_val_df, augmented_output_dir)
+augmented_val_df = augment_images_spark(normalized_val_df, augmented_normalized_output_dir)
 augmented_val_df.show()
 
 # verify output 
-augmented_files = os.listdir(augmented_output_dir)
+augmented_files = os.listdir(augmented_normalized_output_dir)
 print(f"Number of augmented files in output directory: {len(augmented_files)}")
 
-# # create distribution rules for each client
-# # this is a mock distribution - fix later
+final_val_df = prepare_augmented_df_for_partitioning(augmented_val_df)
+final_val_df.show()
+
+# will use this later
 # client_distribution = {
-#     'Client_1': {'Pneumonia': 0.6, 'Other': 0.4},
-#     'Client_2': {'Pneumonia': 0.3, 'Other': 0.7},
-#     'Client_3': {'Pneumonia': 0.5, 'Other': 0.5},
-#     'Client_4': {'Pneumonia': 0.4, 'Other': 0.6},
-#     'Client_5': {'Pneumonia': 0.2, 'Other': 0.8},
+#     'Client_1': {1: 0.7, 0: 0.3},  # 70% Pneumonia cases, 30% Non-Pneumonia cases
+#     'Client_2': {1: 0.4, 0: 0.6},  # 40% Pneumonia, 60% Non-Pneumonia
+#     'Client_3': {1: 0.5, 0: 0.5},  # Balanced data
+#     'Client_4': {1: 0.2, 0: 0.8},  # More Non-Pneumonia cases
 # }
 
-# # partition the data
-# client_data = partition_data(spark, val_df, client_distribution)
-# for client, client_df in client_data.items():
-#     output_path = f"output/{client}/"
-#     os.makedirs(output_path, exist_ok=True)
-#     client_df.write.csv(os.path.join(output_path, "data.csv"), header=True)
+partitioned_output_dir = "output/clients"
+num_clients = 4
+client_dfs = partition_data_even_split(final_val_df, num_clients, partitioned_output_dir)
 
-# # verify distribution
-# for client, client_df in client_data.items():
-#     print(f"Distribution for {client}:")
-#     client_df.groupBy("Pneumonia").count().show()
+verify_unique_split(client_dfs)

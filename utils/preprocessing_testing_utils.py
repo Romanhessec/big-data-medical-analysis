@@ -52,3 +52,31 @@ def test_augmentation(augmented_images, grid_size=(2, 3), titles=None):
     plt.tight_layout()
     plt.show()
 
+def test_partitioning(client_data):
+    for client_id, client_df in client_data.items():
+        print(f"Distribution for {client_id}:")
+        client_df.groupBy("Pneumonia").count().show()
+
+def verify_unique_split(client_dfs):
+    all_paths = set()
+    duplicate_paths = set()
+
+    for idx, client_df in enumerate(client_dfs):
+        # Collect all paths for the current client
+        paths = set(client_df.select("Augmented_Path").rdd.flatMap(lambda x: x).collect())
+
+        # Check for duplicates with existing paths
+        duplicates = all_paths.intersection(paths)
+        if duplicates:
+            duplicate_paths.update(duplicates)
+        
+        # Add current paths to the global set
+        all_paths.update(paths)
+
+    # Report results
+    if duplicate_paths:
+        print(f"Error: Duplicate paths found across clients: {duplicate_paths}")
+    else:
+        print("Success: No duplicate images across clients!")
+
+
