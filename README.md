@@ -12,3 +12,11 @@ Pipeline should be run from the root directory: python3 src/preprocessing_pipeli
 Should be done in memory at the federated learning step - do delete this.
 
 ## Federated learning pipeline
+
+## Requirements:
+python-3.10 (or newer)
+numpy-2.2.1 
+pandas-2.2.3
+opencv-python-4.10.0.84
+pyspark-3.5.4
+matplotlib-3.10.0
