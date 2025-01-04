@@ -1,6 +1,16 @@
 import tensorflow as tf
 import tensorflow_federated as tff
 from tensorflow.keras.applications import ResNet50
+import pandas as pd
+import sys 
+import os
+
+# add project root directory to the Python path
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
+
+from utils.federated_learning_testing_utils import (
+    test_data_load
+)
 
 def load_client_data(client_data_paths):
     """
@@ -13,10 +23,16 @@ def load_client_data(client_data_paths):
     client_data = {}
 
     for idx, path in enumerate(client_data_paths):
-        data = tf.data.experimental.make_csv_dataset(
-            path, batch_size=32, shuffle=True, num_epochs=1, ignore_errors=True
-        )
-        client_data[f"Client_{idx + 1}"] = data
+        # gather all CSV files in the directory because spark leaves them in separate .csvs
+        all_csvs = [os.path.join(path, f) for f in os.listdir(path) if f.endswith(".csv")]
+
+        combined_df = pd.concat((pd.read_csv(f) for f in all_csvs), ignore_index=True)
+
+        # convert pandas df into a tensorflow df
+        dataset = tf.data.Dataset.from_tensor_slices(dict(combined_df))
+        dataset = dataset.batch(32).shuffle(buffer_size=len(combined_df))
+
+        client_data[f"Client_{idx + 1}"] = dataset
     return client_data
 
 def create_model():
