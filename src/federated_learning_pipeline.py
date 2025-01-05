@@ -1,6 +1,8 @@
 import tensorflow as tf
 import tensorflow_federated as tff
 from tensorflow.keras.applications import ResNet50
+from tensorflow_federated.python.learning.models import keras_utils
+from tensorflow_federated.python.learning.optimizers import build_sgdm
 import pandas as pd
 import sys 
 import os
@@ -9,7 +11,8 @@ import os
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
 from utils.federated_learning_testing_utils import (
-    test_data_load
+    test_data_load,
+    test_one_batch
 )
 
 def load_client_data(client_data_paths):
@@ -25,14 +28,24 @@ def load_client_data(client_data_paths):
     for idx, path in enumerate(client_data_paths):
         # gather all CSV files in the directory because spark leaves them in separate .csvs
         all_csvs = [os.path.join(path, f) for f in os.listdir(path) if f.endswith(".csv")]
-
         combined_df = pd.concat((pd.read_csv(f) for f in all_csvs), ignore_index=True)
 
-        # convert pandas df into a tensorflow df
-        dataset = tf.data.Dataset.from_tensor_slices(dict(combined_df))
-        dataset = dataset.batch(32).shuffle(buffer_size=len(combined_df))
+        feature_columns = combined_df[['Cardiomegaly', 'Lung Opacity', 'Edema', 'Consolidation', 'Pneumonia']].values
+        image_paths = combined_df['Augmented_Path'].values
 
+        # convert pandas df into a tensorflow df
+        dataset = tf.data.Dataset.from_tensor_slices((image_paths, feature_columns))
+        
+        # resize the images to adjust to model
+        dataset = dataset.map(lambda img_path, features: (
+            tf.image.resize(
+                tf.image.decode_jpeg(tf.io.read_file(img_path), channels=3), [224, 224]
+            ), features
+        ))
+
+        dataset = dataset.batch(32).shuffle(buffer_size=len(combined_df))
         client_data[f"Client_{idx + 1}"] = dataset
+
     return client_data
 
 def create_model():
@@ -50,23 +63,23 @@ def create_model():
         base_model,
         tf.keras.layers.GlobalAveragePooling2D(),
         tf.keras.layers.Dense(128, activation='relu'),
-        tf.keras.layers.Dense(1, activation='sigmoid')
+        tf.keras.layers.Dense(5, activation='sigmoid')
     ])
 
-    return mode
+    return model
 
-def model_fn():
+def model_fn():    
     """
     Create the model function for TFF.
     """
     keras_model = create_model()
-    return tff.learning.from_keras_model(
+    return keras_utils.from_keras_model(
         keras_model,
         input_spec={
-            'features': tf.TensorSpec(shape=(None, 224, 224, 3), dtype=tf.float32),
-            'label': tf.TensorSpec(shape=(None, 1), dtype=tf.float32),
+            'x': tf.TensorSpec(shape=(None, 224, 224, 3), dtype=tf.float32),
+            'y': tf.TensorSpec(shape=(None, 5), dtype=tf.float32),
         },
-        loss=tf.keras.losses.BinaryCrossentropy(),
+        loss=tf.keras.losses.BinaryCrossentropy(from_logits=False),
         metrics=[tf.keras.metrics.BinaryAccuracy()]
     )
 
@@ -74,10 +87,10 @@ def initialize_federated_process():
     """
     Create a federated learning process using TFF.
     """
-    iterative_process = tff.learning.build_federated_averaging_process(
-        model_fn,
-        client_optimizer_fn=lambda: tf.keras.optimizers.SGD(learning_rate=0.02),
-        server_optimizer_fn=lambda: tf.keras.optimizers.SGD(learning_rate=1.0)
+    iterative_process = tff.learning.algorithms.build_weighted_fed_avg(
+        model_fn=model_fn,
+        client_optimizer_fn=build_sgdm(learning_rate=0.02),
+        server_optimizer_fn=build_sgdm(learning_rate=1.0)
     )
     return iterative_process
 
@@ -112,6 +125,9 @@ client_datasets = load_client_data(client_data_paths)
 
 # initialize the federated learning process
 iterative_process = initialize_federated_process()
+
+# just for testing
+keras_model = create_model()
 
 # train models
 final_state = train_federated_model(iterative_process, client_datasets)
