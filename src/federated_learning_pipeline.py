@@ -6,7 +6,7 @@ from tensorflow_federated.python.learning.optimizers import build_sgdm
 import pandas as pd
 import sys 
 import os
-
+os.environ['TF_CPP_MIN_LOG_LEVEL'] = '2'
 # add project root directory to the Python path
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
@@ -81,10 +81,10 @@ def load_client_data(client_data_paths):
 
 def create_model():
     """
-    Create a ResNet-based model architecture.
+    Create a MobileNetV2-based model architecture.
     """
     base_model = MobileNetV2(
-        weights=None,  # initialize from scratch or use pre-trained weights - maybe?
+        weights='imagenet',  # initialize from scratch or use pre-trained weights - maybe?
         include_top=False,  # exclude the top layer
         input_shape=(224, 224, 3)
     )
@@ -101,17 +101,21 @@ def create_model():
 
 def model_fn():
     keras_model = tf.keras.Sequential([
-        MobileNetV2(weights=None, include_top=False, input_shape=(224, 224, 3)),
+        MobileNetV2(weights='imagenet', include_top=False, input_shape=(224, 224, 3)),
         tf.keras.layers.GlobalAveragePooling2D(),
         tf.keras.layers.Dense(128, activation='relu'),
         tf.keras.layers.Dense(5, activation='sigmoid')
     ])
     return keras_utils.from_keras_model(
         keras_model=keras_model,
-        input_spec=(
-            tf.TensorSpec(shape=(None, 224, 224, 3), dtype=tf.float32),
-            tf.TensorSpec(shape=(None, 5), dtype=tf.float32),
-        ),
+        # input_spec=(
+        #     tf.TensorSpec(shape=(None, 224, 224, 3), dtype=tf.float32),
+        #     tf.TensorSpec(shape=(None, 5), dtype=tf.float32),
+        # ),
+        input_spec={
+            'x': tf.TensorSpec(shape=(None, 224, 224, 3), dtype=tf.float32),
+            'y': tf.TensorSpec(shape=(None, 5), dtype=tf.float32),
+        },
         loss=tf.keras.losses.BinaryCrossentropy(from_logits=False),
         metrics=[tf.keras.metrics.BinaryAccuracy()]
     )
@@ -128,7 +132,7 @@ def initialize_federated_process():
     )
     return iterative_process
 
-def train_federated_model(iterative_process, client_datasets, rounds=1):
+def train_federated_model(iterative_process, client_datasets, rounds=3):
     """
     Train the federated model across multiple rounds.
     Args:
@@ -143,7 +147,8 @@ def train_federated_model(iterative_process, client_datasets, rounds=1):
     for round_num in range(1, rounds + 1):
         client_data = [client_datasets[client_id] for client_id in client_datasets]
         state, metrics = iterative_process.next(state, client_data)
-        print(f'Round {round_num}, Metrics: {metrics}')
+        binary_accuracy = metrics.get('client_work', {}).get('train', {}).get('binary_accuracy', None)
+        print(f'Round {round_num}, Accuracy/Conversion: {binary_accuracy}')
 
     return state
 
@@ -165,6 +170,14 @@ def evaluate_global_model(global_model, evaluation_dataset):
     results = global_model.evaluate(evaluation_dataset, verbose=1)
     print(f"Evaluation Results - Loss: {results[0]}, Accuracy: {results[1]}")
 
+def save_global_model(final_state):
+    # extract the global model weights from the final state
+    model_weights = iterative_process.get_model_weights(final_state)
+
+    keras_model = model_fn()._keras_model
+
+    # Save the global model 
+    keras_model.save('output/global_model.h5')
 
 # load evaluation data
 evaluation_data_path = "chexlocalize/CheXpert/val_labels.csv"
@@ -185,23 +198,4 @@ iterative_process = initialize_federated_process()
 # train models
 final_state = train_federated_model(iterative_process, client_datasets)
 
-# extract the global model weights from the final state
-model_weights = iterative_process.get_model_weights(final_state)
-trainable_weights = model_weights.trainable
-non_trainable_weights = model_weights.non_trainable
 
-keras_model = model_fn()._keras_model
-
-keras_model.set_weights(trainable_weights + non_trainable_weights)
-
-# save the global model
-# keras_model = create_model()
-
-# # keras_model.set_weights(global_weights)
-# keras_model.set_weights(global_weights)
-
-# Save the global model
-keras_model.save('output/global_model.h5')
-
-# Evaluate the global model
-evaluate_global_model(keras_model, evaluation_dataset)

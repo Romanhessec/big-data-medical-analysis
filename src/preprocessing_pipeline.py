@@ -82,7 +82,7 @@ def augment_image(image):
         rotated = cv2.warpAffine(image, M, (w, h))
         augmented_images.append(rotated)
 
-    # scalind and translation
+    # scaling and translation
     for _ in range(3):
         scale = np.random.uniform(0.9, 1.1)
         tx = np.random.randint(-3, 3)
@@ -206,6 +206,40 @@ def partition_data_even_split(final_df, num_clients, output_dir):
 
     return client_dfs
 
+def partition_data_with_skew(final_df, client_distribution, output_dir):
+    """
+    Partition data into subsets for clients with custom label distribution.
+    Args:
+        final_df: Final Spark DataFrame (augmented and prepared).
+        client_distribution: Dictionary specifying label distribution for each client.
+        output_dir: Base directory to save partitioned data for each client.
+    Returns:
+        Dictionary with client IDs and corresponding Spark DataFrames.
+    """
+    if not client_distribution:
+        raise ValueError("client_distribution must be a non-empty dictionary.")
+
+    os.makedirs(output_dir, exist_ok=True)
+    client_dfs = {}
+
+    for client_id, distribution in client_distribution.items():
+        unique_labels = [row["Pneumonia"] for row in final_df.select("Pneumonia").distinct().collect()]
+        fractions = {label: distribution.get(label, 0) for label in unique_labels}
+
+        client_df = final_df.sampleBy("Pneumonia", fractions, seed=42)
+
+        # save the sampled data
+        client_output_path = os.path.join(output_dir, f"{client_id}_data.csv")
+        client_df.write.csv(client_output_path, header=True, mode='overwrite')
+
+        sampled_count = client_df.count()
+        print(f"{client_id} data saved to {client_output_path} with {sampled_count} rows.")
+
+        client_dfs[client_id] = client_df
+
+    return client_dfs
+
+
 # initialize spark session
 spark = SparkSession.builder \
     .appName("NormalizeImages") \
@@ -283,15 +317,15 @@ final_val_df = prepare_augmented_df_for_partitioning(augmented_val_df)
 final_val_df.show()
 
 # will use this later
-# client_distribution = {
-#     'Client_1': {1: 0.7, 0: 0.3},  # 70% Pneumonia cases, 30% Non-Pneumonia cases
-#     'Client_2': {1: 0.4, 0: 0.6},  # 40% Pneumonia, 60% Non-Pneumonia
-#     'Client_3': {1: 0.5, 0: 0.5},  # Balanced data
-#     'Client_4': {1: 0.2, 0: 0.8},  # More Non-Pneumonia cases
-# }
+client_distribution = {
+    'Client_1': {1: 0.7, 0: 0.3},  # 70% Pneumonia cases, 30% Non-Pneumonia cases
+    'Client_2': {1: 0.4, 0: 0.6},  # 40% Pneumonia, 60% Non-Pneumonia
+    'Client_3': {1: 0.5, 0: 0.5},  # Balanced data
+    'Client_4': {1: 0.2, 0: 0.8},  # More Non-Pneumonia cases
+}
 
 partitioned_output_dir = "output/clients"
 num_clients = 4
 client_dfs = partition_data_even_split(final_val_df, num_clients, partitioned_output_dir)
-
+# clients_dfs = partition_data_with_skew(final_val_df, client_distribution, partitioned_output_dir)
 verify_unique_split(client_dfs)
