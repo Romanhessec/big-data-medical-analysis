@@ -5,19 +5,14 @@ The dataset used in this project is CheXpert. You can download it from [this lin
 
 After downloading, place the dataset in the root of this project directory.
 
-## Preprocessing pipeline
-Pipeline should be run from the root directory: python3 src/preprocessing_pipeline.py
-
-# Normalization
-Should be done in memory at the federated learning step - do delete this.
-
-## Federated learning pipeline
+## Run the pipelines
+Pipeline should be run from the root directory: python3 src/preprocessing_pipeline.py && src/federated_learning_pipeline.py
 
 ## Requirements:
-python-3.10 (or newer)
-numpy-2.2.1 
-pandas-2.2.3
-opencv-python-4.10.0.84
-pyspark-3.5.4
-matplotlib-3.10.0
-tensorflow-2.18.0
+python-3.10 (or newer),
+numpy-2.2.1,
+pandas-2.2.3,
+opencv-python-4.10.0.84,
+pyspark-3.5.4,
+matplotlib-3.10.0,
+tensorflow-2.18.0,
